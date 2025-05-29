@@ -34,11 +34,7 @@ def save_history(data):
 
 def notify(ipv4, ipv6):
     bot = Bot(TOKEN)
-    message = (
-        f"🌐 IP-Adresse geändert:\n"
-        f"IPv4: {ipv4}\n"
-        f"IPv6: {ipv6}"
-    )
+    message = f"🌐 IP-Adresse geändert:\n" f"IPv4: {ipv4}\n" f"IPv6: {ipv6}"
     bot.send_message(chat_id=CHAT_ID, text=message)
 
 
