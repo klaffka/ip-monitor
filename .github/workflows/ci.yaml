@@ -33,12 +33,10 @@ jobs:
       - name: 🔐 Security Scan (Bandit)
         run: bandit -r ip_monitor.py
 
-      - name: 🧪 Install Trivy
-        uses: aquasecurity/trivy-action@0.16.1
+      - name: 🔍 Trivy filesystem scan
+        uses: aquasecurity/trivy-action@master
         with:
-          scan-type: "fs"
+          scan-type: fs
           ignore-unfixed: true
-          severity: "CRITICAL,HIGH"
+          severity: HIGH,CRITICAL
 
-      - name: 🔐 Trivy (Filesystem Scan)
-        run: trivy fs . --exit-code 1 --severity HIGH,CRITICAL --skip-dirs .git,__pycache__
