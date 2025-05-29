@@ -34,9 +34,11 @@ def save_history(data):
 
 def notify(ipv4, ipv6):
     bot = Bot(TOKEN)
-    message = f"🌐 IP-Adresse geändert:
-IPv4: {ipv4}
-IPv6: {ipv6}"
+    message = (
+        f"🌐 IP-Adresse geändert:\n"
+        f"IPv4: {ipv4}\n"
+        f"IPv6: {ipv6}"
+    )
     bot.send_message(chat_id=CHAT_ID, text=message)
 
 
@@ -62,10 +64,10 @@ async def handle_ip(update, context):
     else:
         latest = history[-1]
         await update.message.reply_text(
-            f"📍 Letzte bekannte IP:
-IPv4: {latest['ipv4']}
-IPv6: {latest['ipv6']}
-📅 {latest['timestamp']}"
+            f"📍 Letzte bekannte IP:\n"
+            f"IPv4: {latest['ipv4']}\n"
+            f"IPv6: {latest['ipv6']}\n"
+            f"📅 {latest['timestamp']}"
         )
 
 
