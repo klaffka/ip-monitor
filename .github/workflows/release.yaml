@@ -1,0 +1,53 @@
+name: 🚀 Automated Release + Docker Build
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  release:
+    name: 📝 Create Release + Tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      version: ${{ steps.release.outputs.tag_name }}
+
+    steps:
+      - uses: google-github-actions/release-please-action@v4
+        id: release
+        with:
+          release-type: simple
+          package-name: ip-watcher
+
+  build-and-publish:
+    name: 🐳 Build & Push Docker Image
+    needs: release
+    if: needs.release.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 🧾 Checkout code
+        uses: actions/checkout@v3
+
+      - name: 🐳 Login to DockerHub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: 🛠️ Build Docker image
+        run: |
+          VERSION=${{ needs.release.outputs.version }}
+          IMAGE=${{ secrets.DOCKERHUB_USERNAME }}/ip-watcher
+          docker build -t $IMAGE:$VERSION .
+          docker tag $IMAGE:$VERSION $IMAGE:latest
+
+      - name: 📤 Push Docker image
+        run: |
+          VERSION=${{ needs.release.outputs.version }}
+          IMAGE=${{ secrets.DOCKERHUB_USERNAME }}/ip-watcher
+          docker push $IMAGE:$VERSION
+          docker push $IMAGE:latest

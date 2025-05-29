@@ -1,0 +1,42 @@
+name: ✅ CI Checks
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  validate:
+    name: 🧪 Code & Security Checks
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📦 Checkout Code
+        uses: actions/checkout@v3
+
+      - name: 🐍 Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: 📥 Install Python tools
+        run: |
+          pip install --upgrade pip
+          pip install black flake8 bandit
+
+      - name: 🧹 Check Code Format (Black)
+        run: black --check .
+
+      - name: 🔍 Lint (Flake8)
+        run: flake8 ip_monitor.py
+
+      - name: 🔐 Security Scan (Bandit)
+        run: bandit -r ip_monitor.py
+
+      - name: 🔍 Trivy filesystem scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: fs
+          ignore-unfixed: true
+          severity: HIGH,CRITICAL
+

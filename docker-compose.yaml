@@ -1,0 +1,14 @@
+version: '3.8'
+
+services:
+  ip-watcher:
+    build: .
+    environment:
+      TELEGRAM_TOKEN: "<DEIN_BOT_TOKEN>"
+      TELEGRAM_CHAT_ID: "<DEINE_CHAT_ID>"
+      CHECK_INTERVAL: 300
+    volumes:
+      - ip-data:/app
+
+volumes:
+  ip-data:
