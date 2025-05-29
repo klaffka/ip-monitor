@@ -29,6 +29,8 @@ jobs:
 
       - name: 🔍 Lint (Flake8)
         run: flake8 ip_monitor.py
+        with:
+          max-line-length: "100"
 
       - name: 🔐 Security Scan (Bandit)
         run: bandit -r ip_monitor.py
