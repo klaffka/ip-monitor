@@ -1,9 +1,16 @@
 import requests
 import json
 import os
+import logging
 from datetime import datetime
 from telegram import Bot
 from telegram.ext import Application, CommandHandler
+
+# Logging konfigurieren
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
 
 IP_FILE = "data/ip_history.json"
 TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -14,8 +21,10 @@ def get_ips():
     try:
         ipv4 = requests.get("https://api.ipify.org").text
         ipv6 = requests.get("https://api64.ipify.org").text
+        logging.info(f"Aktuelle IPs: IPv4={ipv4}, IPv6={ipv6}")
         return ipv4, ipv6
     except Exception as e:
+        logging.error(f"Fehler beim Abrufen der IPs: {e}")
         return None, None
 
 
@@ -30,12 +39,14 @@ def save_history(data):
     os.makedirs(os.path.dirname(IP_FILE), exist_ok=True)
     with open(IP_FILE, "w") as f:
         json.dump(data, f, indent=2)
+    logging.info("IP-Historie gespeichert.")
 
 
 def notify(ipv4, ipv6):
     bot = Bot(TOKEN)
     message = f"🌐 IP-Adresse geändert:\n" f"IPv4: {ipv4}\n" f"IPv6: {ipv6}"
     bot.send_message(chat_id=CHAT_ID, text=message)
+    logging.info("Benachrichtigung über Telegram gesendet.")
 
 
 def check_and_update():
@@ -45,6 +56,7 @@ def check_and_update():
 
     history = load_history()
     if history and history[-1]["ipv4"] == ipv4 and history[-1]["ipv6"] == ipv6:
+        logging.info("Keine Änderung der IP-Adresse festgestellt.")
         return
 
     timestamp = datetime.now().isoformat()
@@ -68,6 +80,7 @@ async def handle_ip(update, context):
 
 
 if __name__ == "__main__":
+    logging.info("Starte IP-Überwachung und Telegram-Bot.")
     check_and_update()
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("ip", handle_ip))
