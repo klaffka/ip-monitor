@@ -19,8 +19,8 @@ CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 def get_ips():
     try:
-        ipv4 = requests.get("https://api.ipify.org").text
-        ipv6 = requests.get("https://api64.ipify.org").text
+        ipv4 = requests.get("https://api.ipify.org", timeout=5).text
+        ipv6 = requests.get("https://api64.ipify.org", timeout=5).text
         logging.info(f"Aktuelle IPs: IPv4={ipv4}, IPv6={ipv6}")
         return ipv4, ipv6
     except Exception as e:
