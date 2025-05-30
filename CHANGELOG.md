@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.1](https://github.com/klaffka/ip-monitor/compare/v1.0.0...v1.0.1) (2025-05-30)
+
+
+### Features
+
+* add history command ([#6](https://github.com/klaffka/ip-monitor/issues/6)) ([5561948](https://github.com/klaffka/ip-monitor/commit/556194887406f3a33dd40db9c3ca8cd4dd845fa4))
+
 ## 1.0.0 (2025-05-29)
 
 
