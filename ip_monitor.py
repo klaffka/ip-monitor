@@ -1,3 +1,4 @@
+import asyncio
 import requests
 import json
 import os
@@ -75,7 +76,7 @@ def save_history(data):
     logging.info("IP-Historie gespeichert.")
 
 
-def notify(ipv4, ipv6):
+async def notify(ipv4, ipv6):
     try:
         bot = Bot(TOKEN)
         message = "🌐 *IP-Adresse geändert:*\n\n"
@@ -88,7 +89,7 @@ def notify(ipv4, ipv6):
 
         message += f"📅 {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}"
 
-        bot.send_message(chat_id=CHAT_ID, text=message, parse_mode="Markdown")
+        await bot.send_message(chat_id=CHAT_ID, text=message, parse_mode="Markdown")
         logging.info("Benachrichtigung über Telegram gesendet.")
     except Exception as e:
         logging.error(f"Fehler beim Senden der Telegram-Nachricht: {e}")
@@ -112,7 +113,7 @@ def check_and_update():
     timestamp = datetime.now().isoformat()
     history.append({"timestamp": timestamp, "ipv4": ipv4, "ipv6": ipv6})
     save_history(history)
-    notify(ipv4, ipv6)
+    asyncio.run(notify(ipv4, ipv6))
 
 
 async def handle_ip(update, context):
