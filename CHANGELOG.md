@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.0.2](https://github.com/klaffka/ip-monitor/compare/v1.0.1...v1.0.2) (2026-08-24)
+
+
+### Bug Fixes
+
+* await async telegram notification in notify() ([994c113](https://github.com/klaffka/ip-monitor/commit/994c1130bd1ace0fd5dc6e7b51575f853822b747))
+* mount compose volume at /app/data ([8a14157](https://github.com/klaffka/ip-monitor/commit/8a141574f362bedda4634d7e2e15e9dfc5bd5491))
+* show year in /history timestamp format ([dedf317](https://github.com/klaffka/ip-monitor/commit/dedf3177669b183c6674aa09d00d7a77655ea59e))
+
 ## [1.0.1](https://github.com/klaffka/ip-monitor/compare/v1.0.0...v1.0.1) (2025-05-30)
 
 
