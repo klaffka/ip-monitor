@@ -197,7 +197,7 @@ async def handle_history(update, context):
         if ipv6_display == "Nicht verfügbar":
             ipv6_display = "❌ N/A"
 
-        timestamp = datetime.fromisoformat(entry["timestamp"]).strftime("%d.%m. %H:%M")
+        timestamp = datetime.fromisoformat(entry["timestamp"]).strftime("%d.%m.%Y %H:%M")
         message += f"*{i}.* `{timestamp}`\n"
         message += f"   🌐 `{entry['ipv4']}`\n"
         message += f"   🌍 `{ipv6_display}`\n\n"
