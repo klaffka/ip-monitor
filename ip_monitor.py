@@ -142,7 +142,7 @@ async def handle_check(update, context):
     """Führt eine manuelle IP-Prüfung durch"""
     await update.message.reply_text("🔍 Prüfe aktuelle IP-Adressen...")
 
-    ipv4, ipv6 = get_ips()
+    ipv4, ipv6 = await asyncio.to_thread(get_ips)
     if not ipv4:
         await update.message.reply_text("❌ Fehler beim Abrufen der IP-Adressen.")
         return
