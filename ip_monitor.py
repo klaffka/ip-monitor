@@ -1,4 +1,5 @@
 import asyncio
+import functools
 import ipaddress
 import json
 import logging
@@ -6,7 +7,8 @@ import os
 import re
 import sys
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from urllib.parse import urlparse
 
 import requests
 from telegram.ext import Application, CommandHandler
@@ -18,22 +20,64 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 
+
+def _int_env(name, default):
+    """Liest eine ganze Zahl aus einer Env-Variable. Beendet sich bei ungültigem Wert."""
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        logging.error(f"{name} ist ungültig (erwartet ganze Zahl): {raw!r}")
+        sys.exit(1)
+
+
 IP_FILE = "data/ip_history.json"
+HEARTBEAT_FILE = "data/heartbeat"
 TOKEN = os.getenv("TELEGRAM_TOKEN")
-CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+WEBHOOK_URL = os.getenv("TELEGRAM_WEBHOOK_URL")
+# Webhook-Modus muss für Telegram erreichbar sein, daher 0.0.0.0 als Default.
+WEBHOOK_LISTEN = os.getenv("TELEGRAM_WEBHOOK_LISTEN", "0.0.0.0")  # nosec B104
+WEBHOOK_PORT = _int_env("TELEGRAM_WEBHOOK_PORT", 8443)
+SUPPORTED_WEBHOOK_PORTS = (80, 443, 88, 8443)
+HISTORY_LIMIT = _int_env("HISTORY_LIMIT", 100)
+HEARTBEAT_INTERVAL = 60
 
 # Regex für IPv4 (4 Gruppen von 1-3 Ziffern, getrennt durch Punkte)
 IPV4_RE = re.compile(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$")
 
+IPV4_PROVIDERS = [
+    "https://4.myip.is/",
+    "https://api.ipify.org?format=json",
+]
+IPV6_PROVIDERS = [
+    "https://6.myip.is/",
+    "https://api6.ipify.org?format=json",
+]
 
-def fetch_local_ip():
-    """Ruft die lokale/private IP-Adresse über ipify ab."""
+STARTED_AT = datetime.now(timezone.utc)
+LAST_CHECK_AT = None
+
+
+def _parse_chat_ids(raw):
+    """Pars TELEGRAM_CHAT_ID (kommagetrennt) zu einer Liste von Chat-IDs."""
+    if not raw:
+        return []
+    return [int(part) for part in (p.strip() for p in raw.split(",")) if part]
+
+
+def _parse_ts(value):
+    """Parsen eines ISO-8601-Zeitstempels. Gibt None zurück, wenn ungültig."""
     try:
-        response = requests.get("https://api.ipify.org?format=json", timeout=5)
-        response.raise_for_status()
-        return response.json().get("ip")
-    except requests.RequestException:
+        return datetime.fromisoformat(value).astimezone(timezone.utc)
+    except (ValueError, TypeError):
         return None
+
+
+def _norm_ipv6(value):
+    """Normiert IPv6-Darstellungen: None und 'Nicht verfügbar' -> None."""
+    return None if value in (None, "Nicht verfügbar") else value
 
 
 def _parse_ip(ip_str):
@@ -42,6 +86,54 @@ def _parse_ip(ip_str):
         return ipaddress.ip_address(ip_str)
     except ValueError:
         return None
+
+
+def fetch_local_ip():
+    """Ruft die lokale/private IP-Adresse über ipify ab."""
+    try:
+        response = requests.get("https://api.ipify.org?format=json", timeout=5)
+        response.raise_for_status()
+        return response.json().get("ip")
+    except (requests.RequestException, ValueError):
+        return None
+
+
+def _fetch_ip_from(url, is_ipv6):
+    """Ruft eine öffentliche IP von einem einzelnen Provider ab."""
+    response = requests.get(url, timeout=5)
+    response.raise_for_status()
+    raw = str(response.json().get("ip", "")).strip()
+    if is_ipv6:
+        return raw if ":" in raw else None
+    return raw if IPV4_RE.match(raw) else None
+
+
+def fetch_public_ip(is_ipv6):
+    """Ruft die öffentliche IP ab und probiert bei Fehler Fallback-Provider."""
+    providers = IPV6_PROVIDERS if is_ipv6 else IPV4_PROVIDERS
+    for url in providers:
+        try:
+            ip = _fetch_ip_from(url, is_ipv6)
+            if ip:
+                if url != providers[0]:
+                    logging.info(f"Fallback-Provider genutzt: {url}")
+                return ip
+            logging.warning(f"Ungültige IP-Antwort von {url}")
+        except (requests.RequestException, ValueError) as e:
+            logging.warning(f"IP-Provider {url} nicht erreichbar: {e}")
+    return None
+
+
+def fetch_ip_info(ip):
+    """Ruft Provider/Standort einer IPv4-Adresse ab (ipinfo.io). Gibt (isp, location)."""
+    try:
+        response = requests.get(f"https://ipinfo.io/{ip}/json", timeout=5)
+        response.raise_for_status()
+        data = response.json()
+        return data.get("org") or None, data.get("location") or None
+    except (requests.RequestException, ValueError) as e:
+        logging.debug(f"IP-Info nicht verfügbar: {e}")
+        return None, None
 
 
 def detect_cgnat(public_ip, local_ip, ipv6):
@@ -73,7 +165,9 @@ def detect_cgnat(public_ip, local_ip, ipv6):
                         ipaddress.ip_network("172.16.0.0/12"),
                         ipaddress.ip_network("192.168.0.0/16"),
                     ]
-                    if addr in private_nets and local_addr in private_nets and addr != local_addr:
+                    public_is_private = any(addr in net for net in private_nets)
+                    local_is_private = any(local_addr in net for net in private_nets)
+                    if public_is_private and local_is_private and addr != local_addr:
                         reasons.append(
                             "Sowohl öffentliche als auch lokale IPv4 liegen in "
                             "privaten RFC-1918-Bereichen."
@@ -95,43 +189,18 @@ def detect_cgnat(public_ip, local_ip, ipv6):
 
 def get_ips():
     """Ruft IPv4, IPv6 und lokale IP ab. Gibt (ipv4, ipv6, local_ip) zurück."""
-    ipv4 = None
-    ipv6 = "Nicht verfügbar"
-    local_ip = None
+    global LAST_CHECK_AT
+    LAST_CHECK_AT = datetime.now(timezone.utc)
 
-    try:
-        response = requests.get("https://4.myip.is/", timeout=5)
-        response.raise_for_status()
-        ipv4_data = response.json()
-        raw = ipv4_data.get("ip", "")
-        if IPV4_RE.match(str(raw)):
-            ipv4 = raw
-            logging.debug(f"IPv4 Response: {ipv4_data}")
-        else:
-            logging.warning(f"Ungültige IPv4-Adresse vom Server: {raw!r}")
-    except requests.RequestException as e:
-        logging.error(f"Fehler beim Abrufen der IPv4: {e}")
-
-    try:
-        response = requests.get("https://6.myip.is/", timeout=5)
-        response.raise_for_status()
-        ipv6_data = response.json()
-        raw = ipv6_data.get("ip", "")
-        if raw and ":" in str(raw):
-            ipv6 = raw
-            logging.debug(f"IPv6 Response: {ipv6_data}")
-        else:
-            logging.info("Keine IPv6-Adresse verfügbar.")
-            ipv6 = "Nicht verfügbar"
-    except requests.RequestException as e:
-        logging.warning(f"Fehler beim Abrufen der IPv6: {e}")
-        ipv6 = "Nicht verfügbar"
-
+    ipv4 = fetch_public_ip(False)
+    ipv6 = fetch_public_ip(True)
     local_ip = fetch_local_ip()
 
     if ipv4:
         local_str = local_ip or "N/A"
-        logging.info(f"Aktuelle IPs: IPv4={ipv4}, IPv6={ipv6}, Local={local_str}")
+        logging.info(f"Aktuelle IPs: IPv4={ipv4}, IPv6={ipv6 or 'N/A'}, Local={local_str}")
+    else:
+        logging.error("Keine öffentliche IPv4-Adresse über keinen Provider abrufbar.")
 
     return ipv4, ipv6, local_ip
 
@@ -164,15 +233,46 @@ def save_history(data):
             pass
 
 
-def build_ip_message(ipv4, ipv6, cgnat_detected, cgnat_reasons, changed_at):
+def write_heartbeat():
+    """Schreibt einen Liveness-Heartbeat (für den Docker-Healthcheck)."""
+    os.makedirs(os.path.dirname(HEARTBEAT_FILE), exist_ok=True)
+    with open(HEARTBEAT_FILE, "w") as f:
+        f.write(datetime.now(timezone.utc).isoformat())
+
+
+async def _heartbeat_loop(application):
+    """Schreibt zyklisch einen Heartbeat, damit der Healthcheck Liveness prüfen kann."""
+    while True:
+        try:
+            write_heartbeat()
+        except OSError as e:
+            logging.error(f"Heartbeat nicht schreibbar: {e}")
+        await asyncio.sleep(HEARTBEAT_INTERVAL)
+
+
+def build_ip_message(
+    ipv4,
+    ipv6,
+    at,
+    *,
+    changed,
+    cgnat_detected=False,
+    cgnat_reasons=(),
+    isp=None,
+    location=None,
+):
     """Erzeugt den Nachrichtentext für IP-Benachrichtigungen."""
-    status = "geändert" if changed_at else "erfasst"
-    ipv6_display = "❌ N/A" if ipv6 == "Nicht verfügbar" else ipv6
-    timestamp_str = changed_at.strftime("%d.%m.%Y %H:%M:%S")
+    status = "geändert" if changed else "erfasst"
+    ipv6_display = "❌ N/A" if not ipv6 else ipv6
+    timestamp_str = at.strftime("%d.%m.%Y %H:%M:%S")
 
     text = f"🌐 IP-Adresse {status}:\n\n"
     text += f"🌐 IPv4: `{ipv4}`\n"
     text += f"🌍 IPv6: `{ipv6_display}`\n"
+    if isp:
+        text += f"📡 {isp}\n"
+    if location:
+        text += f"📍 {location}\n"
     if cgnat_detected:
         text += "\n⚠️ *Carrier-Grade NAT (CGNAT) erkannt*\n"
         for reason in cgnat_reasons:
@@ -181,36 +281,63 @@ def build_ip_message(ipv4, ipv6, cgnat_detected, cgnat_reasons, changed_at):
     return text
 
 
+def entry_message(entry, changed):
+    """Erzeugt den Nachrichtentext aus einem History-Eintrag."""
+    at = _parse_ts(entry.get("timestamp")) or datetime.now(timezone.utc)
+    return build_ip_message(
+        entry.get("ipv4", "?"),
+        _norm_ipv6(entry.get("ipv6")),
+        at,
+        changed=changed,
+        cgnat_detected=entry.get("cgnat", False),
+        cgnat_reasons=entry.get("cgnat_reasons", []),
+        isp=entry.get("isp"),
+        location=entry.get("location"),
+    )
+
+
 def check_and_record(ipv4, ipv6, local_ip):
     """
-    Prüft ob die IP sich geändert hat, speichert bei Änderung und gibt True zurück.
-    Enthält auch CGNAT-Erkennung.
+    Prüft ob die IP sich geändert hat, speichert bei Änderung und gibt
+    (changed, entry) zurück. entry ist None, wenn sich nichts geändert hat.
     """
     history = load_history()
 
     changed = False
     if history:
-        last_entry = history[-1]
-        if last_entry["ipv4"] != ipv4 or last_entry.get("ipv6") != ipv6:
-            changed = True
+        last = history[-1]
+        changed = last.get("ipv4") != ipv4 or _norm_ipv6(last.get("ipv6")) != _norm_ipv6(ipv6)
     else:
         changed = True
 
-    if changed:
-        cgnat_detected, cgnat_reasons = detect_cgnat(ipv4, local_ip, ipv6)
-        timestamp = datetime.now(timezone.utc).isoformat()
-        history.append(
-            {
-                "timestamp": timestamp,
-                "ipv4": ipv4,
-                "ipv6": ipv6,
-                "cgnat": cgnat_detected,
-                "cgnat_reasons": cgnat_reasons,
-            }
-        )
-        save_history(history)
+    if not changed:
+        return False, None
 
-    return changed
+    cgnat_detected, cgnat_reasons = detect_cgnat(ipv4, local_ip, ipv6)
+    isp, location = fetch_ip_info(ipv4)
+    entry = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "ipv4": ipv4,
+        "ipv6": ipv6,
+        "cgnat": cgnat_detected,
+        "cgnat_reasons": cgnat_reasons,
+        "isp": isp,
+        "location": location,
+    }
+    history.append(entry)
+    if len(history) > HISTORY_LIMIT:
+        del history[: len(history) - HISTORY_LIMIT]
+    save_history(history)
+    return True, entry
+
+
+async def send_to_chats(application, text):
+    """Sendet eine Markdown-Nachricht an alle autorisierten Chats."""
+    for chat_id in CHAT_IDS:
+        try:
+            await application.bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
+        except Exception as e:
+            logging.error(f"Telegram-Nachricht an Chat {chat_id} fehlgeschlagen: {e}")
 
 
 async def check_initial_ip(application):
@@ -220,58 +347,84 @@ async def check_initial_ip(application):
 
         if not ipv4:
             logging.error("Konnte IPv4 beim Initialcheck nicht abrufen.")
-            await application.bot.send_message(
-                chat_id=CHAT_ID,
-                text="❌ Konnte IPv4 beim Start nicht abrufen.",
-                parse_mode="Markdown",
+            await send_to_chats(
+                application,
+                "❌ Konnte IPv4 beim Start nicht abrufen.",
             )
             return
 
-        changed = check_and_record(ipv4, ipv6, local_ip)
+        changed, entry = await asyncio.to_thread(check_and_record, ipv4, ipv6, local_ip)
 
-        if changed:
-            cgnat_detected, cgnat_reasons = detect_cgnat(ipv4, local_ip, ipv6)
-            await application.bot.send_message(
-                chat_id=CHAT_ID,
-                text=build_ip_message(ipv4, ipv6, cgnat_detected, cgnat_reasons, changed_at=True),
-                parse_mode="Markdown",
-            )
+        if changed and entry:
+            await send_to_chats(application, entry_message(entry, changed=True))
         else:
             logging.info("Keine Änderung der IP-Adresse festgestellt.")
     except Exception as e:
         logging.error(f"Fehler im Initial-Check: {e}")
         try:
-            await application.bot.send_message(
-                chat_id=CHAT_ID,
-                text=f"❌ Fehler beim IP-Check: {e}",
-                parse_mode="Markdown",
-            )
+            await send_to_chats(application, f"❌ Fehler beim IP-Check: {e}")
         except Exception:
-            pass
+            # Bewusst verschluckt: Der Fehler ist bereits geloggt, ein weiterer
+            # Fehlschlag bei der Benachrichtigung darf den Start nicht beenden.
+            pass  # nosec B110
 
 
+async def post_init(application):
+    """Startet Heartbeat und führt den initialen IP-Check durch."""
+    application.bot_data["heartbeat_task"] = asyncio.create_task(_heartbeat_loop(application))
+    write_heartbeat()
+    await check_initial_ip(application)
+
+
+async def post_shutdown(application):
+    """Beendet den Heartbeat und loggt den Shutdown."""
+    task = application.bot_data.get("heartbeat_task")
+    if task:
+        task.cancel()
+    logging.info("Bot heruntergefahren.")
+
+
+def authorized(func):
+    """Erlaubt den Command nur für autorisierte Chats (TELEGRAM_CHAT_ID)."""
+
+    @functools.wraps(func)
+    async def wrapper(update, context):
+        chat = update.effective_chat
+        if chat is None or chat.id not in CHAT_IDS:
+            logging.warning("Command '%s' von nicht autorisiertem Chat ignoriert.", func.__name__)
+            return
+        await func(update, context)
+
+    return wrapper
+
+
+@authorized
+async def handle_start(update, context):
+    await update.message.reply_text(
+        "👋 Hallo! Ich überwache deine öffentliche IP-Adresse.\n\n"
+        "Befehle:\n"
+        "/ip - Letzte bekannte IP\n"
+        "/check - Jetzt prüfen\n"
+        "/history - Letzte 5 Änderungen\n"
+        "/stats - Statistik\n"
+        "/status - Bot-Status"
+    )
+
+
+@authorized
 async def handle_ip(update, context):
     history = load_history()
     if not history:
         await update.message.reply_text("Keine IP-Daten gefunden.")
         return
 
-    latest = history[-1]
-    ipv4 = latest.get("ipv4", "?")
-    ipv6 = latest.get("ipv6", "Nicht verfügbar")
-    cgnat = latest.get("cgnat", False)
-    cgnat_reasons = latest.get("cgnat_reasons", [])
-    try:
-        changed_at = datetime.fromisoformat(latest["timestamp"]).astimezone(timezone.utc)
-    except (ValueError, KeyError):
-        changed_at = datetime.now(timezone.utc)
-
     await update.message.reply_text(
-        text=build_ip_message(ipv4, ipv6, cgnat, cgnat_reasons, changed_at),
+        text=entry_message(history[-1], changed=False),
         parse_mode="Markdown",
     )
 
 
+@authorized
 async def handle_check(update, context):
     """Führt eine manuelle IP-Prüfung durch."""
     await update.message.reply_text("🔍 Prüfe aktuelle IP-Adressen...")
@@ -281,22 +434,16 @@ async def handle_check(update, context):
         await update.message.reply_text("❌ Fehler beim Abrufen der IP-Adressen.")
         return
 
-    changed = check_and_record(ipv4, ipv6, local_ip)
+    changed, entry = await asyncio.to_thread(check_and_record, ipv4, ipv6, local_ip)
 
-    if changed:
-        cgnat_detected, cgnat_reasons = detect_cgnat(ipv4, local_ip, ipv6)
-        await update.message.reply_text(
-            text=build_ip_message(ipv4, ipv6, cgnat_detected, cgnat_reasons, changed_at=True),
-            parse_mode="Markdown",
-        )
+    if changed and entry:
+        text = entry_message(entry, changed=True)
     else:
-        cgnat_detected, cgnat_reasons = detect_cgnat(ipv4, local_ip, ipv6)
-        await update.message.reply_text(
-            text=build_ip_message(ipv4, ipv6, cgnat_detected, cgnat_reasons, changed_at=False),
-            parse_mode="Markdown",
-        )
+        text = build_ip_message(ipv4, _norm_ipv6(ipv6), datetime.now(timezone.utc), changed=False)
+    await update.message.reply_text(text, parse_mode="Markdown")
 
 
+@authorized
 async def handle_history(update, context):
     """Zeigt die letzten 5 IP-Änderungen."""
     history = load_history()
@@ -308,27 +455,91 @@ async def handle_history(update, context):
     message = "**IP-Historie** (letzte 5):\n\n"
 
     for i, entry in enumerate(reversed(recent), 1):
-        ipv6_display = (
-            "❌ N/A"
-            if entry.get("ipv6", "Nicht verfügbar") == "Nicht verfügbar"
-            else entry.get("ipv6", "N/A")
-        )
+        ipv6 = _norm_ipv6(entry.get("ipv6"))
+        ipv6_display = "❌ N/A" if not ipv6 else ipv6
 
-        try:
-            changed_at = datetime.fromisoformat(entry["timestamp"]).astimezone(timezone.utc)
-        except (ValueError, KeyError):
-            changed_at = datetime.now(timezone.utc)
-
+        changed_at = _parse_ts(entry.get("timestamp")) or datetime.now(timezone.utc)
         timestamp_str = changed_at.strftime("%d.%m.%Y %H:%M")
 
-        cgnat_badge = ""
-        if entry.get("cgnat"):
-            cgnat_badge = " ⚠️"
-
+        cgnat_badge = " ⚠️" if entry.get("cgnat") else ""
         message += f"**{i}.** `{timestamp_str}`{cgnat_badge}\n"
         message += f"   🌐 `{entry.get('ipv4', 'N/A')}`\n"
-        message += f"   🌍 `{ipv6_display}`\n\n"
+        message += f"   🌍 `{ipv6_display}`\n"
+        if entry.get("isp"):
+            message += f"   📡 {entry.get('isp')}\n"
+        message += "\n"
 
+    await update.message.reply_text(message, parse_mode="Markdown")
+
+
+def format_duration(td):
+    """Formatiert eine Zeitspanne als z. B. '2d 1h', '3m 10s' oder '59s'."""
+    total = int(td.total_seconds())
+    days, rem = divmod(total, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, seconds = divmod(rem, 60)
+    if days:
+        return f"{days}d {hours}h"
+    if hours:
+        return f"{hours}h {minutes}m"
+    if minutes:
+        return f"{minutes}m {seconds}s"
+    return f"{seconds}s"
+
+
+@authorized
+async def handle_status(update, context):
+    """Zeigt Uptime, letzten Check und Betriebsmodus."""
+    history = load_history()
+    now = datetime.now(timezone.utc)
+    mode = f"Webhook ({WEBHOOK_URL})" if WEBHOOK_URL else "Polling"
+    last_check_str = LAST_CHECK_AT.strftime("%d.%m.%Y %H:%M:%S UTC") if LAST_CHECK_AT else "—"
+
+    lines = [
+        "🤖 *Bot-Status*",
+        f"⏱️ Uptime: {format_duration(now - STARTED_AT)}",
+        f"🔍 Letzter Check: {last_check_str}",
+        f"🔗 Modus: {mode}",
+        f"📊 Historie: {len(history)} Einträge (Limit: {HISTORY_LIMIT})",
+    ]
+    if history:
+        last = history[-1]
+        lines.append(f"🌐 Aktuelles IPv4: `{last.get('ipv4')}`")
+        if last.get("cgnat"):
+            lines.append("⚠️ CGNAT erkannt")
+
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+@authorized
+async def handle_stats(update, context):
+    """Zeigt Statistiken zur IP-Historie."""
+    history = load_history()
+    if not history:
+        await update.message.reply_text("Keine IP-Historie vorhanden.")
+        return
+
+    total = len(history)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=30)
+    recent_count = 0
+    ipv6_count = 0
+    cgnat_count = 0
+    for entry in history:
+        ts = _parse_ts(entry.get("timestamp"))
+        if ts is not None and ts >= cutoff:
+            recent_count += 1
+        if _norm_ipv6(entry.get("ipv6")):
+            ipv6_count += 1
+        if entry.get("cgnat"):
+            cgnat_count += 1
+
+    message = (
+        "📊 *IP-Statistik*\n\n"
+        f"🗂️ Einträge gesamt: {total}\n"
+        f"🔁 Änderungen (letzte 30 Tage): {recent_count}\n"
+        f"🌍 IPv6 verfügbar: {ipv6_count}/{total} ({round(100 * ipv6_count / total)}%)\n"
+        f"⚠️ CGNAT erkannt: {cgnat_count}/{total} ({round(100 * cgnat_count / total)}%)\n"
+    )
     await update.message.reply_text(message, parse_mode="Markdown")
 
 
@@ -336,20 +547,58 @@ async def error_handler(update, context):
     logging.error(f"Exception while handling an update: {context.error}", exc_info=context.error)
 
 
+def run_bot():
+    app = (
+        Application.builder().token(TOKEN).post_init(post_init).post_shutdown(post_shutdown).build()
+    )
+    app.add_handler(CommandHandler("start", handle_start))
+    app.add_handler(CommandHandler("ip", handle_ip))
+    app.add_handler(CommandHandler("check", handle_check))
+    app.add_handler(CommandHandler("history", handle_history))
+    app.add_handler(CommandHandler("stats", handle_stats))
+    app.add_handler(CommandHandler("status", handle_status))
+    app.add_error_handler(error_handler)
+
+    if WEBHOOK_URL:
+        cert = os.getenv("TELEGRAM_CERT_FILE")
+        key = os.getenv("TELEGRAM_KEY_FILE")
+        if not cert or not key:
+            logging.error("Webhook-Modus benötigt TELEGRAM_CERT_FILE und TELEGRAM_KEY_FILE.")
+            sys.exit(1)
+        if WEBHOOK_PORT not in SUPPORTED_WEBHOOK_PORTS:
+            logging.error(
+                f"TELEGRAM_WEBHOOK_PORT muss einer dieser Ports sein: {SUPPORTED_WEBHOOK_PORTS}"
+            )
+            sys.exit(1)
+        webhook_path = urlparse(WEBHOOK_URL).path.strip("/") or "telegram"
+        logging.info(f"Starte im Webhook-Modus: {WEBHOOK_URL}")
+        app.run_webhook(
+            listen=WEBHOOK_LISTEN,
+            port=WEBHOOK_PORT,
+            url_path=webhook_path,
+            cert=cert,
+            key=key,
+            webhook_url=WEBHOOK_URL,
+            drop_pending_updates=True,
+            secret_token=os.getenv("TELEGRAM_WEBHOOK_SECRET"),
+        )
+    else:
+        logging.info("Starte im Polling-Modus.")
+        app.run_polling()
+
+
 if __name__ == "__main__":
-    if not TOKEN or not CHAT_ID:
+    try:
+        CHAT_IDS = _parse_chat_ids(os.getenv("TELEGRAM_CHAT_ID"))
+    except ValueError:
+        logging.error(
+            "TELEGRAM_CHAT_ID ist ungültig (erwartet: ganze Zahlen, getrennt durch Komma)."
+        )
+        sys.exit(1)
+
+    if not TOKEN or not CHAT_IDS:
         logging.error("TELEGRAM_TOKEN und TELEGRAM_CHAT_ID müssen gesetzt sein!")
         sys.exit(1)
 
-    app = Application.builder().token(TOKEN).build()
-    app.post_init = check_initial_ip
-    app.add_handler(CommandHandler("ip", handle_ip))
-    app.add_handler(CommandHandler("history", handle_history))
-    app.add_handler(CommandHandler("check", handle_check))
-    app.add_error_handler(error_handler)
-
-    logging.info("Bot gestartet. Befehle:")
-    logging.info("  /ip - Zeigt letzte bekannte IP")
-    logging.info("  /history - Zeigt IP-Historie")
-    logging.info("  /check - Prüft aktuelle IP manuell")
-    app.run_polling()
+    logging.info("Bot gestartet. Befehle: /start /ip /check /history /stats /status")
+    run_bot()

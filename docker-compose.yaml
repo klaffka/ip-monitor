@@ -4,8 +4,16 @@ services:
     environment:
       TELEGRAM_TOKEN: "<DEIN_BOT_TOKEN>"
       TELEGRAM_CHAT_ID: "<DEINE_CHAT_ID>"
+    # Nur im Webhook-Modus relevant: Port für Telegram-Webhooks freigeben
+    ports:
+      - "8443:8443"
     volumes:
       - ip-data:/app/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   ip-data:
