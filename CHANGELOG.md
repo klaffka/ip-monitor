@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.1.0](https://github.com/klaffka/ip-monitor/compare/v1.0.2...v1.1.0) (2026-08-28)
+
+
+### Features
+
+* add CGNAT detection and Docker security hardening ([a3e3de9](https://github.com/klaffka/ip-monitor/commit/a3e3de973f0563069b344b7a3d9485cfe5783ecc))
+* webhook mode, new commands, hardening ([f913f19](https://github.com/klaffka/ip-monitor/commit/f913f1990428935a6f6b3ce0494c3dfac274828b))
+
 ## [1.0.2](https://github.com/klaffka/ip-monitor/compare/v1.0.1...v1.0.2) (2026-08-24)
 
 
