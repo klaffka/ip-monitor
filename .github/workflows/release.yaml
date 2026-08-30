@@ -17,11 +17,10 @@ jobs:
       version: ${{ steps.release.outputs.tag_name }}
 
     steps:
-      - uses: google-github-actions/release-please-action@v4
+      - uses: googleapis/release-please-action@v5
         id: release
         with:
           release-type: simple
-          package-name: ip-watcher
 
   build-and-publish:
     name: 🐳 Build & Push Docker Image
