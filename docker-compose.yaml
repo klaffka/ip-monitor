@@ -1,14 +1,32 @@
 services:
   ip-watcher:
     build: .
+    restart: unless-stopped
+    init: true
+    read_only: true
+    user: "1000:1000"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     environment:
-      TELEGRAM_TOKEN: "<DEIN_BOT_TOKEN>"
-      TELEGRAM_CHAT_ID: "<DEINE_CHAT_ID>"
+      TELEGRAM_TOKEN: "${TELEGRAM_TOKEN}"
+      TELEGRAM_CHAT_ID: "${TELEGRAM_CHAT_ID}"
+      IPINFO_TOKEN: "${IPINFO_TOKEN:-}"
+      HISTORY_LIMIT: "${HISTORY_LIMIT:-100}"
+      TELEGRAM_WEBHOOK_URL: "${TELEGRAM_WEBHOOK_URL:-}"
+      TELEGRAM_WEBHOOK_PORT: "${TELEGRAM_WEBHOOK_PORT:-8443}"
+      TELEGRAM_WEBHOOK_LISTEN: "${TELEGRAM_WEBHOOK_LISTEN:-0.0.0.0}"
+      TELEGRAM_WEBHOOK_SECRET: "${TELEGRAM_WEBHOOK_SECRET:-}"
+      TELEGRAM_CERT_FILE: "${TELEGRAM_CERT_FILE:-}"
+      TELEGRAM_KEY_FILE: "${TELEGRAM_KEY_FILE:-}"
     # Nur im Webhook-Modus relevant: Port für Telegram-Webhooks freigeben
     ports:
-      - "8443:8443"
+      - "${TELEGRAM_WEBHOOK_PORT:-8443}:${TELEGRAM_WEBHOOK_PORT:-8443}"
     volumes:
       - ip-data:/app/data
+    tmpfs:
+      - /tmp:size=16m,mode=1777
     logging:
       driver: json-file
       options:

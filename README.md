@@ -4,134 +4,145 @@
 
 # IP Watcher Bot
 
-Ein Docker-fähiges Python-Tool zur Überwachung deiner öffentlichen IPv4- und IPv6-Adresse mit Benachrichtigungen über Telegram sowie automatisiertem Versioning und CI/CD.
+Ein Docker-fähiger Telegram-Bot, der die öffentliche IPv4- und IPv6-Adresse beim
+Start sowie auf ausdrücklichen `/check`-Befehl prüft. Es gibt bewusst keine
+periodische IP-Prüfung und keine `CHECK_INTERVAL`-Variable.
 
-## 🔧 Features
+## Features
 
-- Überwachung von IPv4 & IPv6
-- Carrier-Grade NAT (CGNAT) / ULA-Erkennung
-- Provider- und Standort-Lookup (ipinfo.io)
-- Fallback-IP-Provider bei Ausfall des primären Diensts
-- Telegram-Benachrichtigung bei IP-Änderung (beim Start und bei manueller Prüfung)
-- Lokale Speicherung der Historie mit Zeitstempel (begrenzt, default 100 Einträge)
-- Telegram-Bot mit den Befehlen `/start`, `/ip`, `/check`, `/history`, `/stats` und `/status`
-- Nur autorisierte Chats dürfen Befehle senden (Whitelist)
-- Optionaler Webhook-Modus als Alternative zu Polling
-- CI/CD: Black, Flake8, Bandit, Trivy sowie Auto-Release (release-please) und Docker-Build bei Push auf `main`
+- Öffentliche IPv4- und IPv6-Ermittlung mit Fallback-Providern
+- Strikte Adressvalidierung und Plausibilitätswarnung bei nicht global routbaren Antworten
+- Optionaler Provider- und grober Standort-Lookup über ipinfo.io
+- Telegram-Benachrichtigung bei Änderungen und eine begrenzte lokale JSON-Historie
+- Befehle `/start`, `/help`, `/ip`, `/check`, `/history`, `/stats` und `/status`
+- Chat-Whitelist, Polling sowie direkte und Reverse-Proxy-Webhooks
+- Atomische History-Writes, serialisierte Checks und Docker-Liveness-Heartbeat
+- CI mit Formatierung, Lint, Unit-Tests, Security-Scans und geprüftem Docker-Image
 
-## 🚀 Nutzung
+Eine Plausibilitätswarnung bedeutet nicht automatisch CGNAT. Sie zeigt an, dass ein
+IP-Provider eine syntaktisch gültige, aber nicht global routbare Adresse geliefert
+hat. Eine lokale Router-Adresse lässt sich über einen öffentlichen IP-Dienst nicht
+zuverlässig bestimmen.
 
-### Docker starten
+## Schnellstart
 
-```bash
-docker run -d \
-  -e TELEGRAM_TOKEN=<your_token> \
-  -e TELEGRAM_CHAT_ID=<your_chat_id> \
-  -v $(pwd)/data:/app/data \
-  your-dockerhub-user/ip-watcher:latest
-```
-
-### Docker Compose starten
+Kopiere zuerst die Vorlage und trage echte Zugangsdaten nur lokal ein:
 
 ```bash
+cp .env.example .env
 docker compose up -d --build
 ```
 
-Die Historie wird im Named Volume `ip-data` unter `/app/data` gespeichert.
+Compose speichert Historie und Heartbeat im Named Volume `ip-data` unter `/app/data`.
+Das Root-Dateisystem des Containers ist schreibgeschützt; der Prozess läuft als
+Benutzer und Gruppe `1000:1000` ohne Linux-Capabilities.
 
-### Manuell starten (für Entwicklung)
+Alternativ direkt mit Docker:
 
 ```bash
+docker run -d \
+  --read-only \
+  --cap-drop ALL \
+  --security-opt no-new-privileges \
+  --user 1000:1000 \
+  -e TELEGRAM_TOKEN=<your_token> \
+  -e TELEGRAM_CHAT_ID=<your_chat_id> \
+  -v "$(pwd)/data:/app/data" \
+  your-dockerhub-user/ip-watcher:latest
+```
+
+Für die lokale Entwicklung:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 export TELEGRAM_TOKEN=<your_token>
 export TELEGRAM_CHAT_ID=<your_chat_id>
 python ip_monitor.py
 ```
 
-## 🤖 Bot-Befehle
+## Bot-Befehle
 
 | Befehl | Beschreibung |
 | --- | --- |
-| `/start` | Zeigt die verfügbaren Befehle |
+| `/start`, `/help` | Zeigt die verfügbaren Befehle |
 | `/ip` | Zeigt die letzte bekannte IP |
-| `/check` | Prüft die aktuellen IPs sofort und meldet Änderungen |
-| `/history` | Zeigt die letzten 5 IP-Änderungen |
-| `/stats` | Zeigt Statistiken (Änderungen, IPv6-, CGNAT-Quote) |
-| `/status` | Zeigt Uptime, letzten Check und Betriebsmodus |
+| `/check` | Prüft IPv4 und IPv6 sofort und meldet Änderungen |
+| `/history` | Zeigt die letzten fünf IP-Änderungen |
+| `/stats` | Zeigt Änderungen, IPv6-Quote und Plausibilitätswarnungen |
+| `/status` | Zeigt Uptime, letzten Versuch, letzten Erfolg und Fehlerstatus |
 
-Der Bot prüft die IP einmal beim Start und anschließend nur noch bei `/check` – es gibt kein periodisches Prüfen.
+Nur Chats aus `TELEGRAM_CHAT_ID` erhalten Antworten. Mehrere IDs werden durch Kommas
+getrennt.
 
-Nur Chats, die in `TELEGRAM_CHAT_ID` aufgeführt sind, dürfen Befehle senden.
-
-## ⚙️ Konfiguration (Umgebungsvariablen)
+## Konfiguration
 
 | Variable | Pflicht | Beschreibung |
 | --- | --- | --- |
 | `TELEGRAM_TOKEN` | ja | Bot-API-Token |
-| `TELEGRAM_CHAT_ID` | ja | Chat-ID(s) für Nachrichten & Befehle, mehrere durch Komma getrennt (z. B. `123456789,-1001234567890`) |
-| `TELEGRAM_WEBHOOK_URL` | nein | Vollständige öffentliche Webhook-URL (HTTPS), aktiviert den Webhook-Modus |
-| `TELEGRAM_CERT_FILE` | bei Webhook | Pfad zum SSL-Zertifikat (PEM) |
-| `TELEGRAM_KEY_FILE` | bei Webhook | Pfad zum SSL-Privatschlüssel (PEM) |
-| `TELEGRAM_WEBHOOK_SECRET` | nein | Secret-Token, den Telegram im Header `X-Telegram-Bot-Api-Secret-Token` senden muss |
-| `TELEGRAM_WEBHOOK_PORT` | nein | Interner Port für Webhooks (Default `8443`, erlaubt: `80`, `443`, `88`, `8443`) |
-| `TELEGRAM_WEBHOOK_LISTEN` | nein | Adresse, auf der der Webhook lauscht (Default `0.0.0.0`) |
-| `HISTORY_LIMIT` | nein | Maximale Anzahl gespeicherter Historie-Einträge (Default `100`) |
+| `TELEGRAM_CHAT_ID` | ja | Eine oder mehrere erlaubte Chat-IDs, kommasepariert |
+| `IPINFO_TOKEN` | nein | Token für zuverlässigere ipinfo.io-Abfragen |
+| `HISTORY_LIMIT` | nein | Anzahl gespeicherter Änderungen, mindestens `1`, Standard `100` |
+| `TELEGRAM_WEBHOOK_URL` | nein | Öffentliche HTTPS-URL; aktiviert Webhook statt Polling |
+| `TELEGRAM_WEBHOOK_SECRET` | nein | Empfohlenes Telegram-Webhook-Secret |
+| `TELEGRAM_WEBHOOK_PORT` | nein | Lokaler Port, Standard `8443` |
+| `TELEGRAM_WEBHOOK_LISTEN` | nein | Listen-Adresse, Standard `0.0.0.0` |
+| `TELEGRAM_CERT_FILE` | nein | PEM-Zertifikat für direkte TLS-Terminierung |
+| `TELEGRAM_KEY_FILE` | nein | Passender PEM-Schlüssel für direkte TLS-Terminierung |
 
-### Webhook-Modus
+Die Anwendung liest Umgebungsvariablen direkt über `os.getenv`; sie lädt selbst keine
+`.env`-Datei. Docker Compose übernimmt dies automatisch.
 
-Standardmäßig läuft der Bot im Polling-Modus. Für einen dauerhaft erreichbaren Bot ohne Polling kann der Webhook-Modus aktiviert werden:
+### Webhooks
 
-1. Der Bot braucht eine **öffentliche HTTPS-URL** mit einem **gültigen Zertifikat** (z. B. Let's Encrypt).
-2. Setze `TELEGRAM_WEBHOOK_URL` (z. B. `https://ip-monitor.example.com/telegram`), `TELEGRAM_CERT_FILE` und `TELEGRAM_KEY_FILE`.
-3. Das Zertifikat und der Schlüssel müssen im Container unter den angegebenen Pfaden liegen (z. B. als Volume mounten).
-4. Der interne Port ist `8443` (im Compose-File bereits freigegeben).
+`TELEGRAM_WEBHOOK_URL` muss eine vollständige öffentliche HTTPS-URL mit Host sein.
+Zertifikat und Schlüssel werden entweder gemeinsam oder gar nicht gesetzt:
 
-Der Webhook-Modus setzt den Webhook bei Telegram und empfängt Updates direkt, ohne zu pollen. Für den Betrieb hinter einer eigenen TLS-Terminierung (z. B. Reverse-Proxy) kann `TELEGRAM_CERT_FILE`/`TELEGRAM_KEY_FILE` weggelassen und die TLS-Endung extern gemacht werden – der Bot lauscht dann auf `http://0.0.0.0:8443`.
+- Hinter einem TLS-terminierenden Reverse Proxy bleiben `TELEGRAM_CERT_FILE` und
+  `TELEGRAM_KEY_FILE` leer. Der Bot lauscht lokal per HTTP auf jedem gültigen Port
+  zwischen `1` und `65535`.
+- Bei direkter TLS-Terminierung werden beide Dateien gesetzt. Dann akzeptiert der Bot
+  nur die von Telegram unterstützten Ports `80`, `88`, `443` und `8443`.
 
-## 📲 Telegram-Bot erstellen
+Ein `TELEGRAM_WEBHOOK_SECRET` ist aus Kompatibilitätsgründen optional, wird aber
+dringend empfohlen. Die vollständige Webhook-URL erscheint nicht in `/status`.
 
-1. **Starte den BotFather in Telegram**  
-   Suche nach `@BotFather` und starte den Chat.
+## Daten und Datenschutz
 
-2. **Erstelle einen neuen Bot**  
-   Sende den Befehl:  
-   ```
-   /newbot
-   ```
-   Gib einen Namen und Benutzernamen für deinen Bot an.  
-   👉 Danach erhältst du einen **API-Token** (wird in `TELEGRAM_TOKEN` verwendet).
+`data/ip_history.json` enthält Zeitstempel, öffentliche IPs sowie optional ISP und
+groben Ort. Koordinaten von ipinfo.io werden weder angezeigt noch gespeichert. Die
+Daten bleiben lokal im konfigurierten Volume; die Abfragen gehen jedoch an die
+IP-Provider und optional an ipinfo.io. Beschädigte oder schemawidrige Historien werden
+nicht überschrieben. Alte Einträge mit `cgnat`/`cgnat_reasons` werden beim Lesen in
+das Feld `warning_reasons` migriert.
 
-3. **Starte deinen Bot**  
-   Suche deinen Bot in Telegram, schreibe ihm `/start`, um ihn zu aktivieren.
-
-4. **Ermittle deine Chat-ID**
-   - Schreibe deinem Bot z. B. `/ip`
-   - Besuche diese URL im Browser (ersetze `<TOKEN>`):
-     ```
-     https://api.telegram.org/bot<TOKEN>/getUpdates
-     ```
-   - In der Antwort findest du `chat.id` – das ist dein `TELEGRAM_CHAT_ID`
-
-## 📦 Projektstruktur
+## Entwicklung und Prüfungen
 
 ```bash
-.
-├── ip_monitor.py              # Hauptlogik für IP-Überwachung und Telegram-Bot
-├── assets/
-│   └── logo.svg               # Logo
-├── Dockerfile                 # Docker-Image-Konfiguration
-├── docker-compose.yaml        # Compose-Setup mit Named Volume für die Historie
-├── pyproject.toml             # Formatierungs-Konfiguration (Black)
-├── requirements.txt           # Python-Abhängigkeiten
-├── AGENTS.md                  # Hinweise für KI-Coding-Assistenten
-├── .github/
-│   └── workflows/
-│       ├── ci.yaml            # Code-Checks (Black, Flake8, Bandit, Trivy)
-│       └── release.yaml       # Auto-Release & Docker-Build bei Push auf main
-└── data/
-    └── ip_history.json        # Historie der IP-Adressen (wird bei Bedarf erstellt)
+black --check .
+flake8 ip_monitor.py --max-line-length 100
+bandit -r ip_monitor.py
+python -m unittest -v
+docker build -t ip-monitor:test .
 ```
 
-## 📄 Lizenz
+Trivy läuft blockierend in CI für Repository und Image. GitHub Actions sind auf
+immutable Commit-SHAs gepinnt und werden über Dependabot gepflegt. Ein Push auf
+`main` kann erst nach erfolgreichen Prüfungen und erfolgreichem Image-Scan durch
+release-please veröffentlicht werden; Conventional Commits steuern die Versionierung.
 
-Dieses Projekt steht unter der **GNU General Public License v3.0**.
+## Projektstruktur
+
+```text
+ip_monitor.py          Anwendung
+tests/                 isolierte Standardbibliothek-Tests
+Dockerfile             Container-Image
+docker-compose.yaml    gehärteter Compose-Betrieb
+.env.example           getrackte Konfigurationsvorlage
+.github/workflows/     CI und automatisierte Releases
+```
+
+## Lizenz
+
+GNU General Public License v3.0
