@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.0](https://github.com/klaffka/ip-monitor/compare/v1.1.0...v1.2.0) (2026-09-03)
+
+
+### Features
+
+* harden IP monitoring and release pipeline ([471448e](https://github.com/klaffka/ip-monitor/commit/471448e54a683339629d67726fa679eb61a6f75f))
+
 ## [1.1.0](https://github.com/klaffka/ip-monitor/compare/v1.0.2...v1.1.0) (2026-08-28)
 
 
